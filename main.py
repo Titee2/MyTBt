@@ -17,7 +17,7 @@ TIMEFRAME = "5m"
 PRICE_LEN = 5
 TARGET_LEN = 5
 NUM_CLOSEST = 3
-SCAN_INTERVAL = 60
+SCAN_INTERVAL = 60  # seconds
 
 # =========================
 # TELEGRAM (ABSOLUTE SAFE)
@@ -52,7 +52,6 @@ def safe_get_json(url, params=None):
 
 def top_25():
     data = safe_get_json(f"{BINANCE}/api/v3/ticker/24hr")
-
     if not isinstance(data, list):
         return []
 
@@ -124,53 +123,72 @@ def wma(series, length):
 # =========================
 def run():
     last_state = {}
+    last_heartbeat_time = time.time()
 
-    send_telegram("✅ Bot started (5M, confirmed candles only)")
+    # 🚀 STARTUP MESSAGE
+    send_telegram(
+        "🚀 Bot started\n"
+        "TF: 5M (confirmed candles only)"
+    )
 
-    while True:
-        symbols = top_25()
+    try:
+        while True:
+            symbols = top_25()
 
-        for sym in symbols:
-            df = klines(sym)
-            if df is None:
-                continue
+            for sym in symbols:
+                df = klines(sym)
+                if df is None:
+                    continue
 
-            # confirmed candle only
-            df = df.iloc[:-1]
+                # confirmed candle only
+                df = df.iloc[:-1]
 
-            hl2 = (df["h"] + df["l"]) / 2
-            value = hl2.rolling(PRICE_LEN).mean()
-            target = df["c"].rolling(TARGET_LEN).mean()
+                hl2 = (df["h"] + df["l"]) / 2
+                value = hl2.rolling(PRICE_LEN).mean()
+                target = df["c"].rolling(TARGET_LEN).mean()
 
-            knn = mean_of_k_closest(
-                value.values,
-                target.values,
-                NUM_CLOSEST
-            )
+                knn = mean_of_k_closest(
+                    value.values,
+                    target.values,
+                    NUM_CLOSEST
+                )
 
-            knn = wma(pd.Series(knn, index=df.index), 5)
+                knn = wma(pd.Series(knn, index=df.index), 5)
 
-            a, b, c = knn.iloc[-3], knn.iloc[-2], knn.iloc[-1]
-            if np.isnan([a, b, c]).any():
-                continue
+                a, b, c = knn.iloc[-3], knn.iloc[-2], knn.iloc[-1]
+                if np.isnan([a, b, c]).any():
+                    continue
 
-            up = b < c and b <= a
-            dn = b > c and b >= a
+                up = b < c and b <= a
+                dn = b > c and b >= a
 
-            prev = last_state.get(sym)
-            ts = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+                prev = last_state.get(sym)
+                ts = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
 
-            if up and prev != "BUY":
-                send_telegram(f"🟢 BUY {sym}\n{ts}")
-                last_state[sym] = "BUY"
+                if up and prev != "BUY":
+                    send_telegram(f"🟢 BUY {sym}\n{ts} IST")
+                    last_state[sym] = "BUY"
 
-            elif dn and prev != "SELL":
-                send_telegram(f"🔴 SELL {sym}\n{ts}")
-                last_state[sym] = "SELL"
+                elif dn and prev != "SELL":
+                    send_telegram(f"🔴 SELL {sym}\n{ts} IST")
+                    last_state[sym] = "SELL"
 
-        time.sleep(SCAN_INTERVAL)
+            # 💓 HEARTBEAT EVERY 30 MINUTES
+            if time.time() - last_heartbeat_time >= 1800:
+                hb_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                send_telegram(f"💓 Bot alive\n{hb_time} IST")
+                last_heartbeat_time = time.time()
+
+            time.sleep(SCAN_INTERVAL)
+
+    except Exception:
+        # 🛑 CRASH / SHUTDOWN MESSAGE
+        send_telegram("🛑 Bot stopped or crashed")
+        raise
 
 # =========================
 # HARD RESTART LOOP
