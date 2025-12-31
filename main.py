@@ -1,7 +1,7 @@
 # ==========================================================
 # AI TREND NAVIGATOR — TELEGRAM ALERT BOT
-# CLOUD / REPLIT / GITHUB ACTIONS READY
-# IST TIMEZONE
+# REPLIT / CLOUD READY (NO REPAINT)
+# IST TIME + SL / TP ADDED
 # ==========================================================
 
 import requests
@@ -21,15 +21,12 @@ if not BOT_TOKEN or not CHAT_ID:
     raise RuntimeError("❌ BOT_TOKEN or CHAT_ID not set in environment variables")
 
 def send_telegram(msg):
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": msg}
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print("Telegram error:", e)
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": msg}
+    requests.post(url, json=payload, timeout=10)
 
 # =========================
-# TIMEZONE (IST)
+# IST TIMEZONE
 # =========================
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -43,7 +40,7 @@ TIMEFRAME = "1h"
 PRICE_LEN = 5
 TARGET_LEN = 5
 NUM_CLOSEST = 3
-SCAN_INTERVAL = 120  # seconds (safe for Binance)
+SCAN_INTERVAL = 60  # seconds
 
 CSV_FILE = "ai_trend_navigator_log.csv"
 BINANCE = "https://api.binance.com"
@@ -53,28 +50,16 @@ BINANCE = "https://api.binance.com"
 # =========================
 if not os.path.exists(CSV_FILE):
     with open(CSV_FILE, "w") as f:
-        f.write("Time,Symbol,Signal,knnMA\n")
+        f.write("Time,Symbol,Signal,Entry,SL,TP,knnMA\n")
 
 # =========================
-# BINANCE DATA (SAFE)
+# DATA FETCH
 # =========================
 def top_25():
-    try:
-        r = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
-        data = r.json()
-
-        # Binance sometimes returns dict on error
-        if not isinstance(data, list):
-            print("Binance non-list response:", data)
-            return []
-
-        usdt = [x for x in data if x.get("symbol", "").endswith("USDT")]
-        usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-        return [x["symbol"] for x in usdt[:25]]
-
-    except Exception as e:
-        print("top_25 error:", e)
-        return []
+    data = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10).json()
+    usdt = [x for x in data if x["symbol"].endswith("USDT")]
+    usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+    return [x["symbol"] for x in usdt[:25]]
 
 def klines(symbol):
     r = requests.get(
@@ -82,9 +67,6 @@ def klines(symbol):
         params={"symbol": symbol, "interval": TIMEFRAME, "limit": 200},
         timeout=10
     ).json()
-
-    if not isinstance(r, list):
-        return None
 
     df = pd.DataFrame(r, columns=[
         "ot","o","h","l","c","v",
@@ -94,7 +76,7 @@ def klines(symbol):
     return df
 
 # =========================
-# INDICATORS
+# INDICATOR CORE (KNN)
 # =========================
 def mean_of_k_closest(value, target, k):
     window = max(k, 30)
@@ -108,60 +90,96 @@ def mean_of_k_closest(value, target, k):
     return out
 
 def wma(series, length):
-    w = np.arange(1, length + 1)
-    return series.rolling(length).apply(lambda x: np.dot(x, w) / w.sum(), raw=True)
+    weights = np.arange(1, length + 1)
+    return series.rolling(length).apply(
+        lambda x: np.dot(x, weights) / weights.sum(), raw=True
+    )
 
 # =========================
-# MAIN LOOP
+# MAIN LOOP (CONFIRMED ONLY)
 # =========================
 last_state = {}
 
-send_telegram(f"✅ AI Trend Navigator started\n{now_ist()}")
+send_telegram(f"✅ AI Trend Navigator bot started (CONFIRMED candles only)\n{now_ist()}")
 
 while True:
     try:
         symbols = top_25()
-        if not symbols:
-            time.sleep(30)
-            continue
 
         for sym in symbols:
             df = klines(sym)
-            if df is None or len(df) < 50:
-                continue
+
+            # ❗ USE LAST CLOSED CANDLE (barstate.isconfirmed)
+            df = df.iloc[:-1]
 
             hl2 = (df["h"] + df["l"]) / 2
             value_in = hl2.rolling(PRICE_LEN).mean()
             target = df["c"].rolling(TARGET_LEN).mean()
 
             knnMA = mean_of_k_closest(value_in.values, target.values, NUM_CLOSEST)
-            knnMA = pd.Series(knnMA)
+            knnMA = pd.Series(knnMA, index=df.index)
             knnMA_ = wma(knnMA, 5)
 
-            a, b, c = knnMA_.iloc[-3], knnMA_.iloc[-2], knnMA_.iloc[-1]
+            a = knnMA_.iloc[-3]
+            b = knnMA_.iloc[-2]
+            c = knnMA_.iloc[-1]
+
             if np.isnan([a, b, c]).any():
                 continue
 
+            # 🔁 COLOR SWITCH LOGIC (EXACT PINE PORT)
             switch_up = b < c and b <= a
             switch_dn = b > c and b >= a
 
             prev = last_state.get(sym)
 
-            if switch_up and prev != "BUY":
-                msg = f"🟢 BUY\n{sym}\nknnMA: {round(c,6)}\nTF: 1H\n{now_ist()}"
+            entry = df["c"].iloc[-1]
+            swing_low = df["l"].iloc[-10:].min()
+            swing_high = df["h"].iloc[-10:].max()
+
+            now = now_ist()
+
+            # ===== BUY =====
+            if switch_up and prev != "GREEN":
+                sl = swing_low
+                tp = entry + 2 * (entry - sl)
+
+                msg = (
+                    f"🟢 BUY SIGNAL\n"
+                    f"{sym}\n"
+                    f"Entry: {entry:.6f}\n"
+                    f"SL: {sl:.6f}\n"
+                    f"TP: {tp:.6f}\n"
+                    f"KNN: {round(c,6)}\n"
+                    f"TF: 1H\n"
+                    f"{now}"
+                )
                 send_telegram(msg)
-                last_state[sym] = "BUY"
+                last_state[sym] = "GREEN"
 
                 with open(CSV_FILE, "a") as f:
-                    f.write(f"{now_ist()},{sym},BUY,{round(c,6)}\n")
+                    f.write(f"{now},{sym},BUY,{entry},{sl},{tp},{c}\n")
 
-            elif switch_dn and prev != "SELL":
-                msg = f"🔴 SELL\n{sym}\nknnMA: {round(c,6)}\nTF: 1H\n{now_ist()}"
+            # ===== SELL =====
+            elif switch_dn and prev != "RED":
+                sl = swing_high
+                tp = entry - 2 * (sl - entry)
+
+                msg = (
+                    f"🔴 SELL SIGNAL\n"
+                    f"{sym}\n"
+                    f"Entry: {entry:.6f}\n"
+                    f"SL: {sl:.6f}\n"
+                    f"TP: {tp:.6f}\n"
+                    f"KNN: {round(c,6)}\n"
+                    f"TF: 1H\n"
+                    f"{now}"
+                )
                 send_telegram(msg)
-                last_state[sym] = "SELL"
+                last_state[sym] = "RED"
 
                 with open(CSV_FILE, "a") as f:
-                    f.write(f"{now_ist()},{sym},SELL,{round(c,6)}\n")
+                    f.write(f"{now},{sym},SELL,{entry},{sl},{tp},{c}\n")
 
         time.sleep(SCAN_INTERVAL)
 
