@@ -1,6 +1,6 @@
 # ==========================================================
 # AI TREND NAVIGATOR — TELEGRAM ALERT BOT
-# 5 MINUTE TIMEFRAME VERSION (NO REPAINT)
+# 5 MINUTE TIMEFRAME (FULLY FIXED / NO REPAINT)
 # ==========================================================
 
 import requests
@@ -20,17 +20,20 @@ if not BOT_TOKEN or not CHAT_ID:
     raise RuntimeError("❌ BOT_TOKEN or CHAT_ID not set")
 
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+    except:
+        pass
 
 # =========================
-# STRATEGY CONFIG (5M)
+# STRATEGY CONFIG
 # =========================
-TIMEFRAME = "5m"                 # ⬅️ CHANGED
+TIMEFRAME = "5m"
 PRICE_LEN = 5
 TARGET_LEN = 5
 NUM_CLOSEST = 3
-SCAN_INTERVAL = 60               # scan every minute
+SCAN_INTERVAL = 60
 
 CSV_FILE = "ai_trend_navigator_5m_log.csv"
 BINANCE = "https://api.binance.com"
@@ -43,27 +46,50 @@ if not os.path.exists(CSV_FILE):
         f.write("Time,Symbol,Signal,knnMA\n")
 
 # =========================
-# DATA FETCH
+# SAFE DATA FETCH
 # =========================
 def top_25():
-    data = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10).json()
-    usdt = [x for x in data if x["symbol"].endswith("USDT")]
-    usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
-    return [x["symbol"] for x in usdt[:25]]
+    try:
+        r = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
+        if r.status_code != 200:
+            return []
+
+        data = r.json()
+        if isinstance(data, dict):
+            return []
+
+        usdt = [x for x in data if x.get("symbol", "").endswith("USDT")]
+        usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+        return [x["symbol"] for x in usdt[:25]]
+
+    except:
+        return []
 
 def klines(symbol):
-    r = requests.get(
-        f"{BINANCE}/api/v3/klines",
-        params={"symbol": symbol, "interval": TIMEFRAME, "limit": 200},
-        timeout=10
-    ).json()
+    try:
+        r = requests.get(
+            f"{BINANCE}/api/v3/klines",
+            params={"symbol": symbol, "interval": TIMEFRAME, "limit": 200},
+            timeout=10
+        )
 
-    df = pd.DataFrame(r, columns=[
-        "ot","o","h","l","c","v",
-        "ct","q","n","tbb","tbq","ig"
-    ])
-    df[["h","l","c"]] = df[["h","l","c"]].astype(float)
-    return df
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+        if not isinstance(data, list):
+            return None
+
+        df = pd.DataFrame(data, columns=[
+            "ot","o","h","l","c","v",
+            "ct","q","n","tbb","tbq","ig"
+        ])
+
+        df[["h","l","c"]] = df[["h","l","c"]].astype(float)
+        return df
+
+    except:
+        return None
 
 # =========================
 # INDICATOR CORE (UNCHANGED)
@@ -93,16 +119,21 @@ def run_bot():
     last_heartbeat_block = None
 
     send_telegram(
-        "✅ AI Trend Navigator started (5M CONFIRMED candles)\n"
+        "✅ AI Trend Navigator STARTED (5M CONFIRMED candles)\n"
         f"{(datetime.utcnow()+timedelta(hours=5,minutes=30)).strftime('%Y-%m-%d %H:%M:%S')} IST"
     )
 
     while True:
         try:
             symbols = top_25()
+            if not symbols:
+                time.sleep(10)
+                continue
 
             for sym in symbols:
                 df = klines(sym)
+                if df is None or len(df) < 50:
+                    continue
 
                 # CONFIRMED CANDLE ONLY
                 df = df.iloc[:-1]
@@ -156,7 +187,7 @@ def run_bot():
             time.sleep(30)
 
 # =========================
-# AUTO-RESTART
+# AUTO-RESTART LOOP
 # =========================
 while True:
     try:
