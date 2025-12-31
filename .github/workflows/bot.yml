@@ -1,45 +1,42 @@
-name: Telegram Bot Runner
+name: AI Trend Navigator Bot
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
+  schedule:
+    - cron: "0 */6 * * *"   # runs every 6 hours as backup
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max safety
+    timeout-minutes: 355    # ~5h 55m (GitHub hard stop is 6h)
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install requests pandas numpy
 
-      - name: Run Telegram bot
+      - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
-          python main.py
+          python bot.py
 
-      # 🔁 AUTO-RESTART (CHAIN NEXT RUN)
+      # 🔁 SELF-CHAIN (re-trigger itself before timeout)
       - name: Re-trigger workflow
         if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: "bot.yml",
-              ref: "main"
-            })
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/bot.yml/dispatches \
+            -d '{"ref":"main"}'
