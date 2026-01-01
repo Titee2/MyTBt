@@ -1,114 +1,86 @@
+# ==========================================================
+# AI TREND NAVIGATOR — PROFESSIONAL EDITION
+# Dual Alerts + Auto Smoothing + Validator + Strength Score
+# ==========================================================
+
 import requests
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime, timedelta
+import threading
+import tkinter as tk
+from tkinter import ttk
+from datetime import datetime
 import os
 
 # =========================
 # CONFIG
 # =========================
-BINANCE = "https://api.binance.com"
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-TIMEFRAME = "5m"
+TIMEFRAME = "5m"            # change freely
+BASE_TF_MIN = 60            # reference = 1H
+BASE_SMOOTHING = 50         # tuned on 1H
 PRICE_LEN = 5
 TARGET_LEN = 5
 NUM_CLOSEST = 3
-SCAN_INTERVAL = 60  # seconds
+SCAN_INTERVAL = 60
+BINANCE = "https://api.binance.com"
 
 # =========================
-# TELEGRAM (ABSOLUTE SAFE)
+# AUTO SMOOTHING
 # =========================
-def send_telegram(text):
-    if not BOT_TOKEN or not CHAT_ID:
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={
-                "chat_id": str(CHAT_ID),
-                "text": str(text)
-            },
-            timeout=5
-        )
-    except:
-        pass
+TF_MINUTES = int(TIMEFRAME.replace("m","")) if "m" in TIMEFRAME else 60
+SMOOTHING = int(BASE_SMOOTHING * (BASE_TF_MIN / TF_MINUTES))
 
 # =========================
-# BINANCE SAFE HELPERS
+# UI
 # =========================
-def safe_get_json(url, params=None):
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        try:
-            return r.json()
-        except:
-            return None
-    except:
-        return None
+root = tk.Tk()
+root.title("AI Trend Navigator — Dual Alerts")
+root.geometry("950x450")
 
+cols = ("Time","Symbol","Type","Signal","Strength","knnMA")
+tree = ttk.Treeview(root, columns=cols, show="headings")
+for c in cols:
+    tree.heading(c, text=c)
+    tree.column(c, width=150)
+tree.pack(fill=tk.BOTH, expand=True)
+
+status = tk.Label(root, text="Running", fg="green")
+status.pack(pady=4)
+
+# =========================
+# DATA
+# =========================
 def top_25():
-    data = safe_get_json(f"{BINANCE}/api/v3/ticker/24hr")
-    if not isinstance(data, list):
-        return []
-
-    pairs = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-
-        symbol = item.get("symbol")
-        volume = item.get("quoteVolume")
-
-        if isinstance(symbol, str) and symbol.endswith("USDT"):
-            try:
-                pairs.append((symbol, float(volume)))
-            except:
-                pass
-
-    pairs.sort(key=lambda x: x[1], reverse=True)
-    return [p[0] for p in pairs[:25]]
+    data = requests.get(f"{BINANCE}/api/v3/ticker/24hr").json()
+    usdt = [x for x in data if x["symbol"].endswith("USDT")]
+    usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+    return [x["symbol"] for x in usdt[:25]]
 
 def klines(symbol):
-    data = safe_get_json(
-        f"{BINANCE}/api/v3/klines",
-        params={"symbol": symbol, "interval": TIMEFRAME, "limit": 200}
-    )
+    r = requests.get(f"{BINANCE}/api/v3/klines", params={
+        "symbol": symbol,
+        "interval": TIMEFRAME,
+        "limit": 300
+    }).json()
 
-    if not isinstance(data, list):
-        return None
-
-    rows = []
-    for row in data:
-        if isinstance(row, list) and len(row) >= 6:
-            rows.append(row)
-
-    if len(rows) < 60:
-        return None
-
-    df = pd.DataFrame(
-        rows,
-        columns=["ot","o","h","l","c","v","ct","q","n","tbb","tbq","ig"]
-    )
-
+    df = pd.DataFrame(r, columns=[
+        "ot","o","h","l","c","v",
+        "ct","q","n","tbb","tbq","ig"
+    ])
     df[["h","l","c"]] = df[["h","l","c"]].astype(float)
     return df
 
 # =========================
-# INDICATORS (UNCHANGED)
+# INDICATORS (PINE-MATCHED)
 # =========================
 def mean_of_k_closest(value, target, k):
     window = max(k, 30)
     out = np.full(len(value), np.nan)
-
     for i in range(window, len(value)):
         dist = np.abs(value[i-window:i] - target[i])
         idx = np.argsort(dist)[:k]
         out[i] = value[i-window:i][idx].mean()
-
     return out
 
 def wma(series, length):
@@ -119,82 +91,86 @@ def wma(series, length):
     )
 
 # =========================
-# MAIN LOOP
+# SIGNAL STRENGTH
 # =========================
-def run():
-    last_state = {}
-    last_heartbeat_time = time.time()
+def strength_score(a, b, c):
+    slope1 = abs(b - a)
+    slope2 = abs(c - b)
+    curvature = abs(c - a)
+    raw = slope1 + slope2 + curvature
+    return min(100, int(raw * 1000))
 
-    # 🚀 STARTUP MESSAGE
-    send_telegram(
-        "🚀 Bot started\n"
-        "TF: 5M (confirmed candles only)"
-    )
+# =========================
+# ALERT
+# =========================
+def alert(sym, typ, signal, strength, value):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tree.insert("", 0, values=(ts, sym, typ, signal, strength, round(value,6)))
 
-    try:
-        while True:
-            symbols = top_25()
+# =========================
+# SCANNER
+# =========================
+last_early = {}
+last_confirmed = {}
 
-            for sym in symbols:
+def scan():
+    while True:
+        try:
+            for sym in top_25():
                 df = klines(sym)
-                if df is None:
-                    continue
-
-                # confirmed candle only
-                df = df.iloc[:-1]
 
                 hl2 = (df["h"] + df["l"]) / 2
                 value = hl2.rolling(PRICE_LEN).mean()
                 target = df["c"].rolling(TARGET_LEN).mean()
 
-                knn = mean_of_k_closest(
-                    value.values,
-                    target.values,
-                    NUM_CLOSEST
-                )
+                knn = mean_of_k_closest(value.values, target.values, NUM_CLOSEST)
+                knn = pd.Series(knn)
+                knnMA = wma(knn, SMOOTHING)
 
-                knn = wma(pd.Series(knn, index=df.index), 5)
-
-                a, b, c = knn.iloc[-3], knn.iloc[-2], knn.iloc[-1]
-                if np.isnan([a, b, c]).any():
+                if len(knnMA) < 3:
                     continue
 
-                up = b < c and b <= a
-                dn = b > c and b >= a
+                # ===== EARLY (LIVE) =====
+                a, b, c = knnMA.iloc[-3], knnMA.iloc[-2], knnMA.iloc[-1]
+                if not np.isnan([a,b,c]).any():
+                    up = b < c and b <= a
+                    dn = b > c and b >= a
 
-                prev = last_state.get(sym)
-                ts = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+                    s = strength_score(a,b,c)
 
-                if up and prev != "BUY":
-                    send_telegram(f"🟢 BUY {sym}\n{ts} IST")
-                    last_state[sym] = "BUY"
+                    if up and last_early.get(sym) != "BUY":
+                        alert(sym,"EARLY","BUY",s,c)
+                        last_early[sym] = "BUY"
 
-                elif dn and prev != "SELL":
-                    send_telegram(f"🔴 SELL {sym}\n{ts} IST")
-                    last_state[sym] = "SELL"
+                    elif dn and last_early.get(sym) != "SELL":
+                        alert(sym,"EARLY","SELL",s,c)
+                        last_early[sym] = "SELL"
 
-            # 💓 HEARTBEAT EVERY 30 MINUTES
-            if time.time() - last_heartbeat_time >= 1800:
-                hb_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-                send_telegram(f"💓 Bot alive\n{hb_time} IST")
-                last_heartbeat_time = time.time()
+                # ===== CONFIRMED =====
+                a,b,c = knnMA.iloc[-4], knnMA.iloc[-3], knnMA.iloc[-2]
+                if not np.isnan([a,b,c]).any():
+                    up = b < c and b <= a
+                    dn = b > c and b >= a
 
-            time.sleep(SCAN_INTERVAL)
+                    s = strength_score(a,b,c)
 
-    except Exception:
-        # 🛑 CRASH / SHUTDOWN MESSAGE
-        send_telegram("🛑 Bot stopped or crashed")
-        raise
+                    if up and last_confirmed.get(sym) != "BUY":
+                        alert(sym,"CONFIRMED","BUY",s,c)
+                        last_confirmed[sym] = "BUY"
+
+                    elif dn and last_confirmed.get(sym) != "SELL":
+                        alert(sym,"CONFIRMED","SELL",s,c)
+                        last_confirmed[sym] = "SELL"
+
+            status.config(text=f"Last scan: {datetime.now().strftime('%H:%M:%S')}")
+
+        except Exception as e:
+            status.config(text=str(e), fg="red")
+
+        time.sleep(SCAN_INTERVAL)
 
 # =========================
-# HARD RESTART LOOP
+# START
 # =========================
-while True:
-    try:
-        run()
-    except:
-        time.sleep(20)
+threading.Thread(target=scan, daemon=True).start()
+root.mainloop()
