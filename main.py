@@ -2,6 +2,7 @@
 # AI TREND NAVIGATOR — OKX CONTINUOUS BOT
 # TOP 100 BY MARKET CAP (EXCLUDING STABLECOINS)
 # 30M TIMEFRAME — ATR TP / SL
+# DUPLICATE SIGNAL FIX (PER-CANDLE LOCK)
 # ==========================================================
 
 import requests
@@ -34,7 +35,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # =========================
-# STABLECOIN FILTER
+# STABLECOINS
 # =========================
 STABLECOINS = {
     "USDT","USDC","BUSD","DAI","TUSD","USDP","FDUSD",
@@ -47,7 +48,6 @@ STABLECOINS = {
 def send_telegram(msg):
     if not BOT_TOKEN or not CHAT_ID:
         return
-
     requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         json={"chat_id": CHAT_ID, "text": msg},
@@ -63,7 +63,7 @@ def wait_for_next_30m():
     time.sleep(max(0, next_close - now + 40))
 
 # =========================
-# TOP 100 (MARKET CAP) — NO STABLES
+# TOP 100 BY MARKET CAP
 # =========================
 def top_100_marketcap():
     r = requests.get(
@@ -71,7 +71,7 @@ def top_100_marketcap():
         params={
             "vs_currency": "usd",
             "order": "market_cap_desc",
-            "per_page": 120,  # fetch extra to offset removed stables
+            "per_page": 120,
             "page": 1
         },
         timeout=15
@@ -82,9 +82,7 @@ def top_100_marketcap():
         sym = coin["symbol"].upper()
         if sym in STABLECOINS:
             continue
-
         symbols.append(f"{sym}-USDT")
-
         if len(symbols) == 100:
             break
 
@@ -116,6 +114,7 @@ def klines(symbol):
     )
 
     df[["h","l","c"]] = df[["h","l","c"]].astype(float)
+    df["ct"] = df["ts"].astype(int)  # confirmed candle time
     return df
 
 # =========================
@@ -124,12 +123,10 @@ def klines(symbol):
 def mean_of_k_closest(value, target, k):
     window = max(k, 30)
     out = np.full(len(value), np.nan)
-
     for i in range(window, len(value)):
         d = np.abs(value[i-window:i] - target[i])
         idx = np.argsort(d)[:k]
         out[i] = value[i-window:i][idx].mean()
-
     return out
 
 def wma(series, length):
@@ -143,19 +140,18 @@ def atr(df, length):
     high = df["h"]
     low = df["l"]
     close = df["c"].shift(1)
-
     tr = pd.concat([
         high - low,
         (high - close).abs(),
         (low - close).abs()
     ], axis=1).max(axis=1)
-
     return tr.rolling(length).mean()
 
 # =========================
 # STATE (NO DUPLICATES)
 # =========================
 last_state = {}
+last_signal_candle = {}   # 🔒 NEW: candle-level lock
 
 # =========================
 # SCAN
@@ -189,7 +185,13 @@ def scan():
         if not state or last_state.get(sym) == state:
             continue
 
+        # 🔒 CONFIRMED CANDLE TIME (LOCK)
+        candle_time = df["ct"].iloc[-2]
+        if last_signal_candle.get(sym) == candle_time:
+            continue
+
         last_state[sym] = state
+        last_signal_candle[sym] = candle_time
 
         entry = round(df["c"].iloc[-2], 6)
         atr_val = atr(df, ATR_LEN).iloc[-2]
@@ -228,7 +230,6 @@ if __name__ == "__main__":
         "🚀 Bot Started (OKX)\n"
         "Universe: Top 100 by Market Cap (No Stablecoins)\n"
         "Timeframe: 30m\n"
-        "TP/SL: ATR-based\n"
         "Mode: Confirmed candle close only"
     )
 
