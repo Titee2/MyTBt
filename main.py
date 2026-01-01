@@ -1,5 +1,5 @@
 # ==========================================================
-# AI TREND NAVIGATOR — GITHUB ACTIONS VERSION
+# AI TREND NAVIGATOR — GITHUB ACTIONS VERSION (FIXED)
 # 5M CONFIRMED CANDLE CLOSE + TELEGRAM ALERTS
 # ==========================================================
 
@@ -13,7 +13,6 @@ from datetime import datetime
 # =========================
 # WAIT FOR CANDLE CONFIRMATION
 # =========================
-# Ensures Binance 5m candle is fully closed
 time.sleep(35)
 
 # =========================
@@ -39,10 +38,7 @@ def send_telegram(msg):
 
     r = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        json={
-            "chat_id": CHAT_ID,
-            "text": msg
-        },
+        json={"chat_id": CHAT_ID, "text": msg},
         timeout=10
     )
 
@@ -50,29 +46,53 @@ def send_telegram(msg):
         print("Telegram error:", r.text)
 
 # =========================
+# SAFE BINANCE REQUEST
+# =========================
+def binance_get(url, params=None):
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
+
+        # Binance error response is a dict, not list
+        if isinstance(data, dict):
+            print("Binance API error:", data)
+            return None
+
+        return data
+
+    except Exception as e:
+        print("Binance request failed:", e)
+        return None
+
+# =========================
 # SYMBOL SELECTION
 # =========================
 def top_25():
-    data = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10).json()
-    usdt = [x for x in data if x["symbol"].endswith("USDT")]
-    usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+    data = binance_get(f"{BINANCE}/api/v3/ticker/24hr")
+    if not data:
+        return []
+
+    usdt = [x for x in data if x.get("symbol", "").endswith("USDT")]
+    usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
     return [x["symbol"] for x in usdt[:25]]
 
 # =========================
 # KLINES
 # =========================
 def klines(symbol):
-    r = requests.get(
+    data = binance_get(
         f"{BINANCE}/api/v3/klines",
         params={
             "symbol": symbol,
             "interval": TIMEFRAME,
             "limit": 200
-        },
-        timeout=10
-    ).json()
+        }
+    )
 
-    df = pd.DataFrame(r, columns=[
+    if not data:
+        return None
+
+    df = pd.DataFrame(data, columns=[
         "ot","o","h","l","c","v",
         "ct","q","n","tbb","tbq","ig"
     ])
@@ -105,8 +125,15 @@ def wma(series, length):
 # SCAN ONCE (CONFIRMED CANDLE)
 # =========================
 def scan_once():
-    for sym in top_25():
+    symbols = top_25()
+    if not symbols:
+        print("No symbols fetched, exiting run.")
+        return
+
+    for sym in symbols:
         df = klines(sym)
+        if df is None or len(df) < 50:
+            continue
 
         hl2 = (df["h"] + df["l"]) / 2
         value_in = hl2.rolling(PRICE_LEN).mean()
@@ -123,7 +150,6 @@ def scan_once():
         if len(knn) < 3:
             continue
 
-        # EXACT candle-close logic (TradingView match)
         a = knn.iloc[-3]
         b = knn.iloc[-2]
         c = knn.iloc[-1]
