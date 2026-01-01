@@ -1,7 +1,7 @@
 # ==========================================================
 # AI TREND NAVIGATOR — OKX CONTINUOUS BOT
-# ATR-BASED TP / SL
-# CONFIRMED 5M CANDLE CLOSE ONLY
+# TOP 100 BY MARKET CAP (EXCLUDING STABLECOINS)
+# 30M TIMEFRAME — ATR TP / SL
 # ==========================================================
 
 import requests
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 # =========================
 # CONFIG
 # =========================
-TIMEFRAME = "5m"
+TIMEFRAME = "30m"
 
 PRICE_LEN = 5
 TARGET_LEN = 5
@@ -26,11 +26,20 @@ ATR_SL_MULT = 1.0
 ATR_TP_MULT = 2.0
 
 OKX = "https://www.okx.com"
+COINGECKO = "https://api.coingecko.com/api/v3"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# =========================
+# STABLECOIN FILTER
+# =========================
+STABLECOINS = {
+    "USDT","USDC","BUSD","DAI","TUSD","USDP","FDUSD",
+    "FRAX","LUSD","USDD","GUSD","PYUSD","EURT"
+}
 
 # =========================
 # TELEGRAM
@@ -46,34 +55,52 @@ def send_telegram(msg):
     )
 
 # =========================
-# WAIT UNTIL NEXT 5M CLOSE
+# WAIT FOR NEXT 30M CLOSE
 # =========================
-def wait_for_next_5m():
+def wait_for_next_30m():
     now = time.time()
-    next_close = ((now // 300) + 1) * 300
-    time.sleep(max(0, next_close - now + 35))
+    next_close = ((now // 1800) + 1) * 1800
+    time.sleep(max(0, next_close - now + 40))
 
 # =========================
-# SYMBOLS
+# TOP 100 (MARKET CAP) — NO STABLES
 # =========================
-def top_25():
+def top_100_marketcap():
     r = requests.get(
-        f"{OKX}/api/v5/market/tickers?instType=SPOT",
-        timeout=10
+        f"{COINGECKO}/coins/markets",
+        params={
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": 120,  # fetch extra to offset removed stables
+            "page": 1
+        },
+        timeout=15
     ).json()
 
-    data = r.get("data", [])
-    usdt = [x for x in data if x["instId"].endswith("-USDT")]
-    usdt.sort(key=lambda x: float(x["volCcy24h"]), reverse=True)
-    return [x["instId"] for x in usdt[:25]]
+    symbols = []
+    for coin in r:
+        sym = coin["symbol"].upper()
+        if sym in STABLECOINS:
+            continue
+
+        symbols.append(f"{sym}-USDT")
+
+        if len(symbols) == 100:
+            break
+
+    return symbols
 
 # =========================
-# KLINES
+# OKX CANDLES
 # =========================
 def klines(symbol):
     r = requests.get(
         f"{OKX}/api/v5/market/candles",
-        params={"instId": symbol, "bar": TIMEFRAME, "limit": 200},
+        params={
+            "instId": symbol,
+            "bar": TIMEFRAME,
+            "limit": 200
+        },
         timeout=10
     ).json()
 
@@ -126,7 +153,7 @@ def atr(df, length):
     return tr.rolling(length).mean()
 
 # =========================
-# STATE (ANTI-DUPLICATE)
+# STATE (NO DUPLICATES)
 # =========================
 last_state = {}
 
@@ -134,13 +161,11 @@ last_state = {}
 # SCAN
 # =========================
 def scan():
-    symbols = top_25()
-    if not symbols:
-        return
+    symbols = top_100_marketcap()
 
     for sym in symbols:
         df = klines(sym)
-        if df is None or len(df) < 50:
+        if df is None or len(df) < 60:
             continue
 
         hl2 = (df["h"] + df["l"]) / 2
@@ -167,17 +192,16 @@ def scan():
         last_state[sym] = state
 
         entry = round(df["c"].iloc[-2], 6)
-
         atr_val = atr(df, ATR_LEN).iloc[-2]
         if np.isnan(atr_val):
             continue
 
         if state == "GREEN":
-            side = "🟢BUY"
+            side = "🟢 BUY"
             sl = round(entry - ATR_SL_MULT * atr_val, 6)
             tp = round(entry + ATR_TP_MULT * atr_val, 6)
         else:
-            side = "🔴SELL"
+            side = "🔴 SELL"
             sl = round(entry + ATR_SL_MULT * atr_val, 6)
             tp = round(entry - ATR_TP_MULT * atr_val, 6)
 
@@ -186,6 +210,7 @@ def scan():
         msg = (
             f"{side} SIGNAL (OKX)\n"
             f"Symbol: {sym}\n"
+            f"Timeframe: 30m\n"
             f"Entry: {entry}\n"
             f"ATR({ATR_LEN}): {round(atr_val,6)}\n"
             f"TP: {tp}\n"
@@ -201,11 +226,12 @@ def scan():
 if __name__ == "__main__":
     send_telegram(
         "🚀 Bot Started (OKX)\n"
-        "Timeframe: 5m\n"
+        "Universe: Top 100 by Market Cap (No Stablecoins)\n"
+        "Timeframe: 30m\n"
         "TP/SL: ATR-based\n"
         "Mode: Confirmed candle close only"
     )
 
     while True:
-        wait_for_next_5m()
+        wait_for_next_30m()
         scan()
