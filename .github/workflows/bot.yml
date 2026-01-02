@@ -2,7 +2,7 @@ name: AI Trend Navigator (30m)
 
 on:
   schedule:
-    - cron: "2,32 * * * *"
+    #- cron: "2,32 * * * *"
   workflow_dispatch:
 
 jobs:
